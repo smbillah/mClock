@@ -305,7 +305,6 @@ class PrioritizedQueueDMClock {
 			schedule[cl] = tag;
 		}
 
-
 		void update_min_deadlines() {
 			Tag tag;
 			K cl;
@@ -316,19 +315,19 @@ class PrioritizedQueueDMClock {
 				if (!tag.has_more)
 					continue;
 
-				if (tag.r_deadline) {
+				if (tag.r_deadline && (tag.r_deadline >= tag.l_deadline)) {
 					if (min_deadline[Q_RESERVE].second > tag.r_deadline) {
 						min_deadline[Q_RESERVE].second = tag.r_deadline;
 						min_deadline[Q_RESERVE].first = cl;
 					}
 				}
-				if (tag.l_deadline) {
-					if (min_deadline[Q_LIMIT].second > tag.l_deadline) {
-						min_deadline[Q_LIMIT].second = tag.l_deadline;
-						min_deadline[Q_LIMIT].first = cl;
-					}
-				}
-				if (tag.p_deadline) {
+//				if (tag.l_deadline) {
+//					if (min_deadline[Q_LIMIT].second > tag.l_deadline) {
+//						min_deadline[Q_LIMIT].second = tag.l_deadline;
+//						min_deadline[Q_LIMIT].first = cl;
+//					}
+//				}
+				if (tag.p_deadline && (tag.p_deadline >= tag.l_deadline)) {
 					if (min_deadline[Q_PROP].second > tag.p_deadline) {
 						min_deadline[Q_PROP].second = tag.p_deadline;
 						min_deadline[Q_PROP].first = cl;
@@ -337,7 +336,7 @@ class PrioritizedQueueDMClock {
 			}
 		}
 
-		void set_min_tag_to_active_client(tag_types_t t) {
+		void find_an_active_client(tag_types_t t) {
 			bool flags[Q_COUNT] = { false, false, false };
 			bool found = false;
 			for (typename Schedule::iterator it = schedule.begin();
@@ -352,7 +351,6 @@ class PrioritizedQueueDMClock {
 						min_deadline[Q_RESERVE].second = tag.r_deadline;
 						flags[Q_RESERVE] = true;
 					}
-
 					if (tag.p_deadline && !flags[Q_PROP]) {
 						min_deadline[Q_PROP].first = cl;
 						min_deadline[Q_PROP].second = tag.p_deadline;
@@ -394,14 +392,12 @@ class PrioritizedQueueDMClock {
 
 				}
 			}
-			if (tag->selected_tag == Q_RESERVE
-					|| tag->selected_tag == Q_LIMIT) {
-				if (tag->l_deadline) {
-					tag->l_deadline = std::max(
-							(tag->l_deadline + tag->l_spacing), (double_t) now);
-					min_deadline[Q_LIMIT].second = tag->l_deadline;
-					min_deadline[Q_LIMIT].first = cl;
-				}
+			// always update l-tag
+			if (tag->l_deadline) {
+				tag->l_deadline = std::max((tag->l_deadline + tag->l_spacing),
+						(double_t) now);
+//				min_deadline[Q_LIMIT].second = tag->l_deadline;
+//				min_deadline[Q_LIMIT].first = cl;
 			}
 			update_min_deadlines();
 		}
@@ -477,15 +473,15 @@ class PrioritizedQueueDMClock {
 					return *it;
 				}
 			}
-
-			it = schedule.find(min_deadline[Q_LIMIT].first);
-			if (it != schedule.end()) {
-				if (it->second.has_more && it->second.limit_capped
-						&& it->second.l_deadline <= t) {
-					it->second.selected_tag = Q_LIMIT;
-					return *it;
-				}
-			}
+//
+//			it = schedule.find(min_deadline[Q_LIMIT].first);
+//			if (it != schedule.end()) {
+//				if (it->second.has_more && it->second.limit_capped
+//						&& it->second.l_deadline <= t) {
+//					it->second.selected_tag = Q_LIMIT;
+//					return *it;
+//				}
+//			}
 
 			it = schedule.find(min_deadline[Q_PROP].first);
 			if (it != schedule.end()) {
@@ -503,19 +499,48 @@ class PrioritizedQueueDMClock {
 			std::pair<K, Tag> f = front();
 			assert((f.second.selected_tag != Q_NONE));
 
+			//debug
+			{
+				if(virtual_clock == 20)
+					cout<<"take a look\n";
+				cout << virtual_clock << "\t";
+				for (typename Schedule::iterator it = schedule.begin();
+						it != schedule.end(); ++it) {
+					K cl = it->first;
+					Tag tag = it->second;
+
+					if (f.first == cl) {
+						if (f.second.selected_tag == Q_RESERVE)
+							std::cout << "*";
+						if (f.second.selected_tag == Q_PROP)
+							std::cout << "~";
+						if (f.second.selected_tag == Q_LIMIT)
+							std::cout << "_";
+					}
+					print_tag(tag);
+					std::cout << " ||\t ";
+				}
+				std::cout << std::endl;
+			}
+
+
 			T ret = requests[f.first].front();
 			requests[f.first].pop_front();
 			virtual_clock++;
 			if (requests[f.first].empty()) {
 				schedule[f.first].has_more = false;
-				set_min_tag_to_active_client(f.second.selected_tag);
+				find_an_active_client(f.second.selected_tag);
 			}else{
 				update_tags(f.first);
 			}
 			size--;
+
 			return ret;
 		}
 
+		void print_tag(Tag tag){
+			std::cout<<tag.r_deadline <<"\t"<<tag.p_deadline<<"\t"<<tag.l_deadline<<"\t";
+		}
 		unsigned length() const {
 			assert(size >= 0);
 			return (unsigned) size;
