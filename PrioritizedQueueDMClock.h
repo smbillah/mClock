@@ -25,11 +25,8 @@
 #include <time.h>
 #include <float.h>
 #include "utime.h"
-#include <queue>
-#include <set>
 
 #include "/usr/include/assert.h"
-//#include <unordered_map>
 
 /**
  * Manages queue for normal and strict priority items
@@ -219,188 +216,147 @@ class PrioritizedQueueDMClock {
 		unsigned tokens, max_tokens;
 		int64_t size;
 		int64_t virtual_clock;
-		enum tag_types_t {
-			Q_NONE = -1, Q_RESERVE = 0, Q_LIMIT, Q_PROP, Q_COUNT
-		};
-
-		struct Deadline {
-			K cl;
-			double_t deadline;
-			bool valid;
-			Deadline() :
-					deadline(0), valid(false) {
-			}
-			void set_values(K c, double_t d){
-				cl = c;
-				deadline = d;
-				valid = true;
-			}
-			;
-		};
-		Deadline min_deadline[Q_COUNT];
 
 		// data structure for dmClock
+		enum tag_types_t {
+			Q_NONE = -1, Q_RESERVE = 0, Q_PROP, Q_LIMIT, Q_COUNT
+		};
+
 		struct Tag {
 			double_t r_deadline, r_spacing;
 			double_t p_deadline, p_spacing;
 			double_t l_deadline, l_spacing;
-			bool limit_capped, has_more;
+			bool limit_capped, active;
 			tag_types_t selected_tag;
+			K cl;
+			SLO slo;
 
-			Tag() :
+			Tag(K _cl, SLO _slo) :
 					r_deadline(0), r_spacing(0), p_deadline(0), p_spacing(0), l_deadline(
-							0), l_spacing(0), limit_capped(false), has_more(
-							true), selected_tag(Q_NONE) {
+							0), l_spacing(0), limit_capped(false), active(true), selected_tag(
+							Q_NONE), cl(_cl), slo(_slo) {
 			}
 			Tag(utime_t t) :
 					r_deadline(t), r_spacing(0), p_deadline(t), p_spacing(0), l_deadline(
-							t), l_spacing(0), limit_capped(false), has_more(
-							true), selected_tag(Q_NONE) {
+							t), l_spacing(0), limit_capped(false), active(true), selected_tag(
+							Q_NONE) {
 			}
 
 			Tag(int64_t t) :
 					r_deadline(t), r_spacing(0), p_deadline(t), p_spacing(0), l_deadline(
-							t), l_spacing(0), limit_capped(false), has_more(
-							true), selected_tag(Q_NONE) {
+							t), l_spacing(0), limit_capped(false), active(true), selected_tag(
+							Q_NONE) {
 			}
-		};
 
-		typedef std::map<K, Tag> Schedule;
+		};
+		typedef std::vector<Tag> Schedule;
 		Schedule schedule;
 
+		struct Deadline {
+			unsigned cl_index;
+			double_t deadline;
+			bool valid;
+			Deadline() :
+					cl_index(0), deadline(0), valid(false) {
+			}
+			void set_values(unsigned ci, double_t d, bool v = true) {
+				cl_index = ci;
+				deadline = d;
+				valid = v;
+			}
+		};
+		Deadline min_tag_r, min_tag_p;
+
 		void create_new_tag(K cl, SLO slo) {
-			Tag tag;
+			Tag tag(cl, slo);
 			if (slo.reserve) {
 				tag.r_deadline = virtual_clock;
 				tag.r_spacing = (double_t) max_tokens / slo.reserve;
 				take_tokens(slo.reserve);
 
-				if (!min_deadline[Q_RESERVE].deadline) {
-					min_deadline[Q_RESERVE].set_values(cl, tag.r_deadline);
-				} else {
-					if (min_deadline[Q_RESERVE].deadline > tag.r_deadline)
-						min_deadline[Q_RESERVE].set_values(cl, tag.r_deadline);
+				// update all other proportional shares
+				for (typename Schedule::iterator it = schedule.begin();
+						it != schedule.end(); ++it) {
+					if (it->slo.prop) {
+						double_t _prop = (double_t) tokens * it->slo.prop;
+						if (_prop)
+							it->p_spacing = (double_t) max_tokens / _prop;
+					}
 				}
 			}
-
 			if (slo.limit) {
 				assert(slo.limit > slo.reserve);
 				tag.l_deadline = virtual_clock;
 				tag.l_spacing = (double_t) max_tokens / slo.limit;
-
-				if (!min_deadline[Q_LIMIT].deadline) {
-					min_deadline[Q_LIMIT].set_values(cl, tag.l_deadline);
-				} else {
-					if (min_deadline[Q_LIMIT].deadline > tag.l_deadline)
-						min_deadline[Q_LIMIT].set_values(cl, tag.l_deadline);
-				}
 			}
-
 			double_t prop = (double_t) tokens * slo.prop;
 			if (slo.prop && prop) {
 				tag.p_spacing = (double_t) max_tokens / prop;
-
-				if (min_deadline[Q_PROP].deadline)
-					tag.p_deadline = min_deadline[Q_PROP].deadline;
-				else
-					tag.p_deadline = virtual_clock;
-
-				min_deadline[Q_PROP].set_values(cl, tag.p_deadline);
-
+				tag.p_deadline =
+						min_tag_p.deadline ? min_tag_p.deadline : virtual_clock;
 				if (slo.limit && (prop >= (double_t) slo.limit))
 					tag.limit_capped = true;
 			}
-			schedule[cl] = tag;
+			schedule.push_back(tag);
+			update_min_deadlines();
 		}
 
 		void update_min_deadlines() {
-			Tag tag;
-			K cl;
+			min_tag_r.valid = min_tag_p.valid = false;
+			unsigned index = 0;
 			for (typename Schedule::iterator it = schedule.begin();
-					it != schedule.end(); ++it) {
-				tag = it->second;
-				cl = it->first;
-				if (!tag.has_more)
+					it != schedule.end(); ++it, index++) {
+				Tag tag = *it;
+				if (!tag.active)
 					continue;
 
-				if (tag.r_deadline && (tag.r_deadline >= tag.l_deadline)) {
-					if (min_deadline[Q_RESERVE].deadline > tag.r_deadline)
-						min_deadline[Q_RESERVE].set_values(cl, tag.r_deadline);
+				if (tag.r_deadline
+						&& ((tag.r_deadline >= tag.l_deadline)
+								|| (tag.l_deadline <= virtual_clock))) {
+					if (min_tag_r.valid) {
+						if (min_tag_r.deadline >= tag.r_deadline)
+							min_tag_r.set_values(index, tag.r_deadline);
+					} else {
+						min_tag_r.set_values(index, tag.r_deadline);
+					}
 				}
-				if (tag.p_deadline && (tag.p_deadline >= tag.l_deadline)) {
-					if (min_deadline[Q_PROP].deadline > tag.p_deadline)
-						min_deadline[Q_PROP].set_values(cl, tag.p_deadline);
+
+				if (tag.p_deadline && (tag.l_deadline <= virtual_clock)) {
+					if (min_tag_p.valid) {
+						if (min_tag_p.deadline >= tag.p_deadline)
+							min_tag_p.set_values(index, tag.p_deadline);
+					} else {
+						min_tag_p.set_values(index, tag.p_deadline);
+					}
 				}
 			}
 		}
 
 		void issue_idle_cycle() {
-			cout << "idle cycle issued\n";
+			//cout << virtual_clock << "\t" << "idle cycle issued\n";
 			++virtual_clock;
 		}
 
-		void find_an_active_client(tag_types_t t) {
-			bool flags[Q_COUNT] = { false, false, false };
-			bool found = false;
-			for (typename Schedule::iterator it = schedule.begin();
-					it != schedule.end(); ++it) {
-				if (it->second.has_more) {
-					K cl = it->first;
-					Tag tag = it->second;
-					found = true;
-
-					if (tag.r_deadline && !flags[Q_RESERVE]) {
-						min_deadline[Q_RESERVE].cl = cl;
-						min_deadline[Q_RESERVE].deadline = tag.r_deadline;
-						flags[Q_RESERVE] = true;
-					}
-					if (tag.p_deadline && !flags[Q_PROP]) {
-						min_deadline[Q_PROP].cl = cl;
-						min_deadline[Q_PROP].deadline = tag.p_deadline;
-						flags[Q_PROP] = true;
-					}
-					if (tag.l_deadline && !flags[Q_LIMIT]) {
-						min_deadline[Q_LIMIT].deadline = tag.l_deadline;
-						min_deadline[Q_LIMIT].cl = cl;
-						flags[Q_LIMIT] = true;
-					}
-					if (flags[Q_RESERVE] && flags[Q_PROP] && flags[Q_LIMIT])
-						break;
-				}
-			}
-
-			if (found)
-				update_min_deadlines();
-		}
-
-		void update_tags(K cl) {
+		void update_tags(unsigned cl_index, bool was_idle = false) {
 			int64_t now = virtual_clock;
-			Tag *tag = &schedule[cl];
+			Tag *tag = &schedule[cl_index];
 
-			if (tag->selected_tag == Q_RESERVE
-					|| tag->selected_tag == Q_LIMIT) {
-				if (tag->r_deadline) {
+			if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_NONE) {
+				if (tag->r_deadline)
 					tag->r_deadline = std::max(
 							(tag->r_deadline + tag->r_spacing), (double_t) now);
-					min_deadline[Q_RESERVE].cl = cl;
-					min_deadline[Q_RESERVE].deadline = tag->r_deadline;
-				}
 			}
-			if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_PROP) {
-				if (tag->p_deadline) {
+			if (tag->p_deadline) {
+				if (!was_idle)
 					tag->p_deadline = std::max(
 							(tag->p_deadline + tag->p_spacing), (double_t) now);
-					min_deadline[Q_PROP].cl = cl;
-					min_deadline[Q_PROP].deadline = tag->p_deadline;
-
-				}
+				else
+					tag->p_deadline =
+							min_tag_p.deadline ? min_tag_p.deadline : now;
 			}
-			// always update l-tag
 			if (tag->l_deadline) {
 				tag->l_deadline = std::max((tag->l_deadline + tag->l_spacing),
 						(double_t) now);
-//				min_deadline[Q_LIMIT].deadline = tag->l_deadline;
-//				min_deadline[Q_LIMIT].cl = cl;
 			}
 			update_min_deadlines();
 		}
@@ -450,87 +406,115 @@ class PrioritizedQueueDMClock {
 				tokens = 0;
 		}
 
+		void purge_idle_clients() {
+			typename Schedule::iterator it = schedule.begin();
+			for (; it != schedule.end();) {
+				if (!it->active) {
+					put_tokens(it->slo.reserve);
+					requests.erase(it->cl);
+					it = schedule.erase(it);
+				} else {
+					++it;
+				}
+			}
+
+			// update all proportional shares
+			for (it = schedule.begin(); it != schedule.end(); ++it) {
+				if (it->slo.prop) {
+					double_t _prop = (double_t) tokens * it->slo.prop;
+					if (_prop)
+						it->p_spacing = (double_t) max_tokens / _prop;
+				}
+			}
+		}
+
 		void enqueue(K cl, SLO slo, double cost, T item) {
-			bool idle_or_new = (requests.find(cl) == requests.end());
-			if (idle_or_new)
+			bool new_cl = (requests.find(cl) == requests.end());
+			if (new_cl) {
 				create_new_tag(cl, slo);
+			} else {
+				if (requests[cl].empty()) {
+					unsigned index = -1;
+					for (typename Schedule::iterator it = schedule.begin();
+							it != schedule.end(); ++it) {
+						if (it->cl == cl) {
+							index = it - schedule.begin();
+							break;
+						}
+					}
+					assert((index >= 0 && index < schedule.size()));
+					update_tags(index, true);
+				}
+			}
 			requests[cl].push_back(item);
 			size++;
 		}
 
-		std::pair<K, Tag> front() {
-			assert(!(requests.empty()));
+		Tag front(unsigned &out) {
+			assert((size != 0));
 			int64_t t = virtual_clock;
-			typename Schedule::iterator it;
 
-			it = schedule.find(min_deadline[Q_RESERVE].cl);
-			if (it != schedule.end()) {
-				if (it->second.has_more && it->second.r_deadline <= t) {
-					it->second.selected_tag = Q_RESERVE;
-					return *it;
+			if (min_tag_r.valid) {
+				Tag *tag = &schedule[min_tag_r.cl_index];
+				if (tag->r_deadline <= t) {
+					tag->selected_tag = Q_RESERVE;
+					out = min_tag_r.cl_index;
+					return *tag;
 				}
 			}
-//
-//			it = schedule.find(min_deadline[Q_LIMIT].cl);
-//			if (it != schedule.end()) {
-//				if (it->second.has_more && it->second.limit_capped
-//						&& it->second.l_deadline <= t) {
-//					it->second.selected_tag = Q_LIMIT;
-//					return *it;
-//				}
-//			}
-
-			it = schedule.find(min_deadline[Q_PROP].cl);
-			if (it != schedule.end()) {
-				if (it->second.has_more) {
-					it->second.selected_tag = Q_PROP;
-					return *it;
+			if (min_tag_p.valid) {
+				Tag *tag = &schedule[min_tag_p.cl_index];
+				if (tag->p_deadline) {
+					tag->selected_tag = Q_PROP;
+					out = min_tag_p.cl_index;
+					return *tag;
 				}
 			}
-			it = schedule.end();
-			return std::make_pair(min_deadline[Q_RESERVE].cl, Tag());
+			// error condition
+			out = 0;
+			return Tag(schedule[0]);
 		}
 
 		T pop_front() {
 			assert(!(requests.empty()));
-			std::pair<K, Tag> f = front();
-			assert((f.second.selected_tag != Q_NONE));
+			unsigned cl_index;
+			Tag tag = front(cl_index);
+//			assert((f.second.selected_tag != Q_NONE));
+			while (tag.selected_tag == Q_NONE) {
+				issue_idle_cycle();
+				tag = front(cl_index);
+			}
 
 			//debug
 			{
-				if (virtual_clock == 20)
+				if (virtual_clock == 3)
 					cout << "take a look\n";
 				cout << virtual_clock << "\t";
 				for (typename Schedule::iterator it = schedule.begin();
 						it != schedule.end(); ++it) {
-					K cl = it->first;
-					Tag tag = it->second;
-
-					if (f.first == cl) {
-						if (f.second.selected_tag == Q_RESERVE)
+					Tag _tag = *it;
+					if (cl_index == (it - schedule.begin())) {
+						if (tag.selected_tag == Q_RESERVE)
 							std::cout << "*";
-						if (f.second.selected_tag == Q_PROP)
+						if (tag.selected_tag == Q_PROP)
 							std::cout << "~";
-						if (f.second.selected_tag == Q_LIMIT)
+						if (tag.selected_tag == Q_LIMIT)
 							std::cout << "_";
 					}
-					print_tag(tag);
+					print_tag(_tag);
 					std::cout << " ||\t ";
 				}
 				std::cout << std::endl;
 			}
 
-			T ret = requests[f.first].front();
-			requests[f.first].pop_front();
+			T ret = requests[tag.cl].front();
+			requests[tag.cl].pop_front();
 			virtual_clock++;
-			if (requests[f.first].empty()) {
-				schedule[f.first].has_more = false;
-				find_an_active_client(f.second.selected_tag);
-			} else {
-				update_tags(f.first);
-			}
-			size--;
+			if (requests[tag.cl].empty())
+				schedule[tag.cl].active = false;
 
+			update_tags(cl_index);
+			size--;
 			return ret;
 		}
 
