@@ -62,9 +62,6 @@ struct SLO {
 	int64_t limit;
 };
 
-#define ldlog_p1(cct, sub, lvl)                 \
-  (cct->_conf->subsys.should_gather((sub), (lvl)))
-
 template<typename T, typename K>
 class PrioritizedQueueDMClock {
 	int64_t total_priority;
@@ -226,26 +223,27 @@ class PrioritizedQueueDMClock {
 			double_t r_deadline, r_spacing;
 			double_t p_deadline, p_spacing;
 			double_t l_deadline, l_spacing;
-			bool limit_capped, active;
+			bool active;
 			tag_types_t selected_tag;
 			K cl;
 			SLO slo;
+			double_t stat;
 
 			Tag(K _cl, SLO _slo) :
 					r_deadline(0), r_spacing(0), p_deadline(0), p_spacing(0), l_deadline(
-							0), l_spacing(0), limit_capped(false), active(true), selected_tag(
-							Q_NONE), cl(_cl), slo(_slo) {
+							0), l_spacing(0),  active(true), selected_tag(
+							Q_NONE), cl(_cl), slo(_slo), stat(0) {
 			}
 			Tag(utime_t t) :
 					r_deadline(t), r_spacing(0), p_deadline(t), p_spacing(0), l_deadline(
-							t), l_spacing(0), limit_capped(false), active(true), selected_tag(
-							Q_NONE) {
+							t), l_spacing(0),  active(true), selected_tag(
+							Q_NONE), stat(0) {
 			}
 
 			Tag(int64_t t) :
 					r_deadline(t), r_spacing(0), p_deadline(t), p_spacing(0), l_deadline(
-							t), l_spacing(0), limit_capped(false), active(true), selected_tag(
-							Q_NONE) {
+							t), l_spacing(0),  active(true), selected_tag(
+							Q_NONE), stat(0) {
 			}
 
 		};
@@ -270,7 +268,7 @@ class PrioritizedQueueDMClock {
 		void create_new_tag(K cl, SLO slo) {
 			Tag tag(cl, slo);
 			if (slo.reserve) {
-				tag.r_deadline = virtual_clock;
+				tag.r_deadline = get_current_clock();
 				tag.r_spacing = (double_t) max_tokens / slo.reserve;
 				take_tokens(slo.reserve);
 
@@ -286,20 +284,42 @@ class PrioritizedQueueDMClock {
 			}
 			if (slo.limit) {
 				assert(slo.limit > slo.reserve);
-				tag.l_deadline = virtual_clock;
+				tag.l_deadline = get_current_clock();
 				tag.l_spacing = (double_t) max_tokens / slo.limit;
 			}
 			double_t prop = (double_t) tokens * slo.prop;
 			if (slo.prop && prop) {
 				tag.p_spacing = (double_t) max_tokens / prop;
 				tag.p_deadline =
-						min_tag_p.deadline ? min_tag_p.deadline : virtual_clock;
-				if (slo.limit && (prop >= (double_t) slo.limit))
-					tag.limit_capped = true;
+						min_tag_p.deadline ? min_tag_p.deadline : get_current_clock();
 			}
 			schedule.push_back(tag);
 			update_min_deadlines();
 		}
+
+		void update_tags(unsigned cl_index, bool was_idle = false) {
+					int64_t now = get_current_clock();
+					Tag *tag = &schedule[cl_index];
+
+					if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_NONE) {
+						if (tag->r_deadline)
+							tag->r_deadline = std::max(
+									(tag->r_deadline + tag->r_spacing), (double_t) now);
+					}
+					if (tag->p_deadline) {
+						if (!was_idle)
+							tag->p_deadline = std::max(
+									(tag->p_deadline + tag->p_spacing), (double_t) now);
+						else
+							tag->p_deadline =
+									min_tag_p.deadline ? min_tag_p.deadline : now;
+					}
+					if (tag->l_deadline) {
+						tag->l_deadline = std::max((tag->l_deadline + tag->l_spacing),
+								(double_t) now);
+					}
+					update_min_deadlines();
+				}
 
 		void update_min_deadlines() {
 			min_tag_r.valid = min_tag_p.valid = false;
@@ -312,7 +332,7 @@ class PrioritizedQueueDMClock {
 
 				if (tag.r_deadline
 						&& ((tag.r_deadline >= tag.l_deadline)
-								|| (tag.l_deadline <= virtual_clock))) {
+								|| (tag.l_deadline <= get_current_clock()))) {
 					if (min_tag_r.valid) {
 						if (min_tag_r.deadline >= tag.r_deadline)
 							min_tag_r.set_values(index, tag.r_deadline);
@@ -321,7 +341,7 @@ class PrioritizedQueueDMClock {
 					}
 				}
 
-				if (tag.p_deadline && (tag.l_deadline <= virtual_clock)) {
+				if (tag.p_deadline && (tag.l_deadline <= get_current_clock())) {
 					if (min_tag_p.valid) {
 						if (min_tag_p.deadline >= tag.p_deadline)
 							min_tag_p.set_values(index, tag.p_deadline);
@@ -333,32 +353,31 @@ class PrioritizedQueueDMClock {
 		}
 
 		void issue_idle_cycle() {
-			//cout << virtual_clock << "\t" << "idle cycle issued\n";
-			++virtual_clock;
+			//#ifdef DEBUG
+				//cout << get_current_clock() << "____idle_____" << "\t" << "\n";
+				//print_current_tag(Q_NONE);
+			//#endif
+			increment_clock();
+			update_min_deadlines();
 		}
 
-		void update_tags(unsigned cl_index, bool was_idle = false) {
-			int64_t now = virtual_clock;
-			Tag *tag = &schedule[cl_index];
-
-			if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_NONE) {
-				if (tag->r_deadline)
-					tag->r_deadline = std::max(
-							(tag->r_deadline + tag->r_spacing), (double_t) now);
+		void print_current_tag(tag_types_t tt, int index = -1) {
+			cout << get_current_clock() << "\t";
+			for (typename Schedule::iterator it = schedule.begin();
+					it != schedule.end(); ++it) {
+				Tag _tag = *it;
+				if (index == (it - schedule.begin())) {
+					if (tt == Q_RESERVE)
+						std::cout << "*";
+					if (tt == Q_PROP)
+						std::cout << "~";
+					if (tt == Q_LIMIT)
+						std::cout << "_";
+				}
+				std::cout << _tag.r_deadline << "\t " << _tag.p_deadline
+						<< " \t " << _tag.l_deadline << " \t || ";
 			}
-			if (tag->p_deadline) {
-				if (!was_idle)
-					tag->p_deadline = std::max(
-							(tag->p_deadline + tag->p_spacing), (double_t) now);
-				else
-					tag->p_deadline =
-							min_tag_p.deadline ? min_tag_p.deadline : now;
-			}
-			if (tag->l_deadline) {
-				tag->l_deadline = std::max((tag->l_deadline + tag->l_spacing),
-						(double_t) now);
-			}
-			update_min_deadlines();
+			std::cout << std::endl;
 		}
 
 	public:
@@ -366,7 +385,6 @@ class PrioritizedQueueDMClock {
 				requests(other.requests), tokens(other.tokens), max_tokens(
 						other.max_tokens), size(other.size), schedule(
 						other.schedule), virtual_clock(other.virtual_clock) {
-
 		}
 
 		SubQueueDMClock() :
@@ -378,6 +396,10 @@ class PrioritizedQueueDMClock {
 		}
 
 		int64_t increment_clock() {
+			if(virtual_clock == max_tokens){
+				for(unsigned i=0 ; i < schedule.size(); i++)
+					std::cout <<"client "<<i<<" IOPS :"<<schedule[i].stat <<std::endl;
+			}
 			return ++virtual_clock;
 		}
 
@@ -417,7 +439,6 @@ class PrioritizedQueueDMClock {
 					++it;
 				}
 			}
-
 			// update all proportional shares
 			for (it = schedule.begin(); it != schedule.end(); ++it) {
 				if (it->slo.prop) {
@@ -426,6 +447,58 @@ class PrioritizedQueueDMClock {
 						it->p_spacing = (double_t) max_tokens / _prop;
 				}
 			}
+		}
+
+		Tag* front(unsigned &out) {
+			assert((size != 0));
+			int64_t t = get_current_clock();
+
+			if (min_tag_r.valid) {
+				Tag *tag = &schedule[min_tag_r.cl_index];
+				if (tag->r_deadline <= t) {
+					tag->selected_tag = Q_RESERVE;
+					out = min_tag_r.cl_index;
+					return tag;
+				}
+			}
+			if (min_tag_p.valid) {
+				Tag *tag = &schedule[min_tag_p.cl_index];
+				if (tag->p_deadline) {
+					tag->selected_tag = Q_PROP;
+					out = min_tag_p.cl_index;
+					return tag;
+				}
+			}
+			out = -1;
+			return NULL;
+		}
+
+		T pop_front() {
+			assert((size != 0));
+			unsigned cl_index;
+			Tag *tag = front(cl_index);
+
+			// issue idle cycle
+			while (size && tag == NULL) {
+				issue_idle_cycle();
+				tag = front(cl_index);
+			}
+
+			//#ifdef DEBUG
+				//print_current_tag(tag->selected_tag, cl_index);
+				tag->stat++;
+			//#endif
+
+
+			T ret = requests[tag->cl].front();
+			requests[tag->cl].pop_front();
+			if (requests[tag->cl].empty())
+				schedule[tag->cl].active = false;
+
+			increment_clock();
+			update_tags(cl_index);
+			size--;
+			return ret;
 		}
 
 		void enqueue(K cl, SLO slo, double cost, T item) {
@@ -450,78 +523,6 @@ class PrioritizedQueueDMClock {
 			size++;
 		}
 
-		Tag front(unsigned &out) {
-			assert((size != 0));
-			int64_t t = virtual_clock;
-
-			if (min_tag_r.valid) {
-				Tag *tag = &schedule[min_tag_r.cl_index];
-				if (tag->r_deadline <= t) {
-					tag->selected_tag = Q_RESERVE;
-					out = min_tag_r.cl_index;
-					return *tag;
-				}
-			}
-			if (min_tag_p.valid) {
-				Tag *tag = &schedule[min_tag_p.cl_index];
-				if (tag->p_deadline) {
-					tag->selected_tag = Q_PROP;
-					out = min_tag_p.cl_index;
-					return *tag;
-				}
-			}
-			// error condition
-			out = 0;
-			return Tag(schedule[0]);
-		}
-
-		T pop_front() {
-			assert(!(requests.empty()));
-			unsigned cl_index;
-			Tag tag = front(cl_index);
-//			assert((f.second.selected_tag != Q_NONE));
-			while (tag.selected_tag == Q_NONE) {
-				issue_idle_cycle();
-				tag = front(cl_index);
-			}
-
-			//debug
-			{
-				if (virtual_clock == 3)
-					cout << "take a look\n";
-				cout << virtual_clock << "\t";
-				for (typename Schedule::iterator it = schedule.begin();
-						it != schedule.end(); ++it) {
-					Tag _tag = *it;
-					if (cl_index == (it - schedule.begin())) {
-						if (tag.selected_tag == Q_RESERVE)
-							std::cout << "*";
-						if (tag.selected_tag == Q_PROP)
-							std::cout << "~";
-						if (tag.selected_tag == Q_LIMIT)
-							std::cout << "_";
-					}
-					print_tag(_tag);
-					std::cout << " ||\t ";
-				}
-				std::cout << std::endl;
-			}
-
-			T ret = requests[tag.cl].front();
-			requests[tag.cl].pop_front();
-			virtual_clock++;
-			if (requests[tag.cl].empty())
-				schedule[tag.cl].active = false;
-
-			update_tags(cl_index);
-			size--;
-			return ret;
-		}
-
-		void print_tag(Tag tag) {
-			std::cout << tag.r_deadline << "\t" << tag.p_deadline << "\t"
-					<< tag.l_deadline << "\t";
-		}
 		unsigned length() const {
 			assert(size >= 0);
 			return (unsigned) size;
@@ -652,11 +653,11 @@ public:
 		high_queue[priority].enqueue_front(cl, 0, item);
 	}
 
-	void enqueue(K cl, struct SLO slo, unsigned cost, T item) {
+	void enqueue_mClock(K cl, struct SLO slo, unsigned cost, T item) {
 		dm_queue.enqueue(cl, slo, cost, item);
 	}
 
-	void enqueue2(K cl, unsigned priority, unsigned cost, T item) {
+	void enqueue(K cl, unsigned priority, unsigned cost, T item) {
 		if (cost < min_cost)
 			cost = min_cost;
 		if (cost > max_tokens_per_subqueue)
@@ -679,13 +680,13 @@ public:
 		return queue.empty() && high_queue.empty() && dm_queue.empty();
 	}
 
-	T dequeue() {
+	T dequeue_mClock() {
 		assert(!(dm_queue.empty()));
 		//dm_queue.increment_clock(); // ceph_clock_now(NULL);
 		return dm_queue.pop_front();
 	}
 
-	T dequeue2() {
+	T dequeue() {
 		assert(!empty());
 
 		if (!(high_queue.empty())) {
