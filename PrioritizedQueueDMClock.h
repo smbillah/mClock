@@ -251,13 +251,13 @@ class PrioritizedQueueDMClock {
 		Schedule schedule;
 
 		struct Deadline {
-			unsigned cl_index;
+			size_t cl_index;
 			double_t deadline;
 			bool valid;
 			Deadline() :
 					cl_index(0), deadline(0), valid(false) {
 			}
-			void set_values(unsigned ci, double_t d, bool v = true) {
+			void set_values(size_t ci, double_t d, bool v = true) {
 				cl_index = ci;
 				deadline = d;
 				valid = v;
@@ -294,7 +294,7 @@ class PrioritizedQueueDMClock {
 			update_min_deadlines();
 		}
 
-		void update_tags(unsigned cl_index, bool was_idle = false) {
+		void update_tags(size_t cl_index, bool was_idle = false) {
 			int64_t now = get_current_clock();
 			Tag *tag = &schedule[cl_index];
 
@@ -331,7 +331,7 @@ class PrioritizedQueueDMClock {
 
 		void update_min_deadlines() {
 			min_tag_r.valid = min_tag_p.valid = false;
-			unsigned index = 0;
+			size_t index = 0;
 			for (typename Schedule::iterator it = schedule.begin();
 					it != schedule.end(); ++it, index++) {
 				Tag tag = *it;
@@ -391,14 +391,27 @@ class PrioritizedQueueDMClock {
 			}
 		}
 
+		bool get_client_index(K cl, size_t &index){
+			bool is_found = false;
+			for (typename Schedule::iterator it = schedule.begin();
+					it != schedule.end(); ++it) {
+				if (it->cl == cl) {
+					index = it - schedule.begin();
+					is_found = true;
+					break;
+				}
+			}
+			return is_found;
+		}
+
 		//helper function
 		void print_iops() {
 			std::cout << "throughput at " << virtual_clock << ":\n";
-			for (unsigned i = 0; i < schedule.size(); i++)
+			for (size_t i = 0; i < schedule.size(); i++)
 				std::cout << "\t client " << i << " IOPS :" << schedule[i].stat
 						<< std::endl;
 		}
-
+		// helper function
 		void print_current_tag(tag_types_t tt, int index = -1) {
 			cout << get_current_clock() << "\t";
 			for (typename Schedule::iterator it = schedule.begin();
@@ -501,7 +514,7 @@ class PrioritizedQueueDMClock {
 				recalculate_prop_throughput();
 		}
 
-		Tag* front(unsigned &out) {
+		Tag* front(size_t &out) {
 			assert((size != 0));
 			int64_t t = get_current_clock();
 
@@ -521,13 +534,12 @@ class PrioritizedQueueDMClock {
 					return tag;
 				}
 			}
-			out = -1;
 			return NULL;
 		}
 
 		T pop_front() {
 			assert((size != 0));
-			unsigned cl_index;
+			size_t cl_index;
 			Tag *tag = front(cl_index);
 
 			// issue idle cycle
@@ -558,15 +570,9 @@ class PrioritizedQueueDMClock {
 				create_new_tag(cl, slo);
 			} else {
 				if (requests[cl].empty()) {
-					unsigned index = -1;
-					for (typename Schedule::iterator it = schedule.begin();
-							it != schedule.end(); ++it) {
-						if (it->cl == cl) {
-							index = it - schedule.begin();
-							break;
-						}
-					}
-					assert((index >= 0 && index < schedule.size()));
+					size_t index = 0;
+					bool found = get_client_index(cl, index);
+					assert(found != false);
 					update_tags(index, true);
 				}
 			}
