@@ -210,7 +210,7 @@ class PrioritizedQueueDMClock {
 	private:
 		typedef std::map<K, std::list<T> > Requests;
 		Requests requests;
-		unsigned tokens, max_tokens;
+		unsigned throughput_available, throughput_prop, throughput_system;
 		int64_t size;
 		int64_t virtual_clock;
 
@@ -231,18 +231,18 @@ class PrioritizedQueueDMClock {
 
 			Tag(K _cl, SLO _slo) :
 					r_deadline(0), r_spacing(0), p_deadline(0), p_spacing(0), l_deadline(
-							0), l_spacing(0),  active(true), selected_tag(
+							0), l_spacing(0), active(true), selected_tag(
 							Q_NONE), cl(_cl), slo(_slo), stat(0) {
 			}
 			Tag(utime_t t) :
 					r_deadline(t), r_spacing(0), p_deadline(t), p_spacing(0), l_deadline(
-							t), l_spacing(0),  active(true), selected_tag(
+							t), l_spacing(0), active(true), selected_tag(
 							Q_NONE), stat(0) {
 			}
 
 			Tag(int64_t t) :
 					r_deadline(t), r_spacing(0), p_deadline(t), p_spacing(0), l_deadline(
-							t), l_spacing(0),  active(true), selected_tag(
+							t), l_spacing(0), active(true), selected_tag(
 							Q_NONE), stat(0) {
 			}
 
@@ -269,57 +269,65 @@ class PrioritizedQueueDMClock {
 			Tag tag(cl, slo);
 			if (slo.reserve) {
 				tag.r_deadline = get_current_clock();
-				tag.r_spacing = (double_t) max_tokens / slo.reserve;
-				take_tokens(slo.reserve);
-
-				// update all other proportional shares
-				for (typename Schedule::iterator it = schedule.begin();
-						it != schedule.end(); ++it) {
-					if (it->slo.prop) {
-						double_t _prop = (double_t) tokens * it->slo.prop;
-						if (_prop)
-							it->p_spacing = (double_t) max_tokens / _prop;
-					}
-				}
+				tag.r_spacing = (double_t) get_system_throughput()
+						/ slo.reserve;
+				reserve_throughput(slo.reserve);
 			}
 			if (slo.limit) {
 				assert(slo.limit > slo.reserve);
 				tag.l_deadline = get_current_clock();
-				tag.l_spacing = (double_t) max_tokens / slo.limit;
+				tag.l_spacing = (double_t) get_system_throughput() / slo.limit;
 			}
-			double_t prop = (double_t) tokens * slo.prop;
-			if (slo.prop && prop) {
-				tag.p_spacing = (double_t) max_tokens / prop;
+
+			if (slo.prop) {
+				reserve_prop_throughput(slo.prop);
+				double_t prop = calculate_prop_throughput(slo.prop);
+				assert(prop > 0);
+				tag.p_spacing = (double_t) get_system_throughput() / prop;
 				tag.p_deadline =
-						min_tag_p.deadline ? min_tag_p.deadline : get_current_clock();
+						min_tag_p.deadline ?
+								min_tag_p.deadline : get_current_clock();
+
+				recalculate_prop_throughput();
 			}
 			schedule.push_back(tag);
 			update_min_deadlines();
 		}
 
 		void update_tags(unsigned cl_index, bool was_idle = false) {
-					int64_t now = get_current_clock();
-					Tag *tag = &schedule[cl_index];
+			int64_t now = get_current_clock();
+			Tag *tag = &schedule[cl_index];
 
-					if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_NONE) {
-						if (tag->r_deadline)
-							tag->r_deadline = std::max(
-									(tag->r_deadline + tag->r_spacing), (double_t) now);
-					}
-					if (tag->p_deadline) {
-						if (!was_idle)
-							tag->p_deadline = std::max(
-									(tag->p_deadline + tag->p_spacing), (double_t) now);
-						else
-							tag->p_deadline =
-									min_tag_p.deadline ? min_tag_p.deadline : now;
-					}
-					if (tag->l_deadline) {
-						tag->l_deadline = std::max((tag->l_deadline + tag->l_spacing),
+			if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_NONE) {
+				if (tag->r_deadline) {
+					if (was_idle) {
+						tag->r_deadline = std::max(
+								(tag->r_deadline + tag->r_spacing),
 								(double_t) now);
+					} else {
+						tag->r_deadline = tag->r_deadline + tag->r_spacing;
 					}
-					update_min_deadlines();
 				}
+			}
+			if (tag->p_deadline) {
+				if (was_idle) {
+					tag->p_deadline =
+							min_tag_p.deadline ? min_tag_p.deadline : now;
+				} else {
+					tag->p_deadline = tag->p_deadline + tag->p_spacing;
+				}
+			}
+			if (tag->l_deadline) {
+				if (was_idle) {
+					tag->l_deadline = std::max(
+							(tag->l_deadline + tag->l_spacing), (double_t) now);
+				} else {
+					tag->l_deadline = tag->l_deadline + tag->l_spacing;
+				}
+
+			}
+			update_min_deadlines();
+		}
 
 		void update_min_deadlines() {
 			min_tag_r.valid = min_tag_p.valid = false;
@@ -354,11 +362,41 @@ class PrioritizedQueueDMClock {
 
 		void issue_idle_cycle() {
 			//#ifdef DEBUG
-				//cout << get_current_clock() << "____idle_____" << "\t" << "\n";
-				//print_current_tag(Q_NONE);
+			cout << get_current_clock() << "____idle_____" << "\t" << "\n";
+			print_current_tag(Q_NONE);
 			//#endif
 			increment_clock();
 			update_min_deadlines();
+		}
+
+		double_t calculate_prop_throughput(double_t prop) const {
+			if (throughput_prop && prop) {
+				if (prop <= throughput_prop)
+					return throughput_available * (prop / throughput_prop);
+				else
+					return throughput_available;
+			}
+			return 0;
+		}
+
+		void recalculate_prop_throughput() {
+			double_t prop;
+			for (typename Schedule::iterator it = schedule.begin();
+					it != schedule.end(); ++it) {
+				if (it->slo.prop) {
+					prop = calculate_prop_throughput(it->slo.prop);
+					assert(prop > 0);
+					it->p_spacing = (double_t) get_system_throughput() / prop;
+				}
+			}
+		}
+
+		//helper function
+		void print_iops() {
+			std::cout << "throughput at: " <<virtual_clock << ":\n";
+			for (unsigned i = 0; i < schedule.size(); i++)
+				std::cout << "client " << i << " IOPS :" << schedule[i].stat
+						<< std::endl;
 		}
 
 		void print_current_tag(tag_types_t tt, int index = -1) {
@@ -382,13 +420,16 @@ class PrioritizedQueueDMClock {
 
 	public:
 		SubQueueDMClock(const SubQueueDMClock &other) :
-				requests(other.requests), tokens(other.tokens), max_tokens(
-						other.max_tokens), size(other.size), schedule(
+				requests(other.requests), throughput_available(
+						other.throughput_available), throughput_prop(
+						other.throughput_prop), throughput_system(
+						other.throughput_system), size(other.size), schedule(
 						other.schedule), virtual_clock(other.virtual_clock) {
 		}
 
 		SubQueueDMClock() :
-				tokens(0), max_tokens(0), size(0), virtual_clock(1) {
+				throughput_available(0), throughput_prop(0), throughput_system(
+						0), size(0), virtual_clock(1) {
 		}
 
 		int64_t get_current_clock() {
@@ -396,57 +437,70 @@ class PrioritizedQueueDMClock {
 		}
 
 		int64_t increment_clock() {
-			if(virtual_clock == max_tokens){
-				for(unsigned i=0 ; i < schedule.size(); i++)
-					std::cout <<"client "<<i<<" IOPS :"<<schedule[i].stat <<std::endl;
+			if (virtual_clock == throughput_system) {
+				for (unsigned i = 0; i < schedule.size(); i++)
+					std::cout << "client " << i << " IOPS :" << schedule[i].stat
+							<< std::endl;
 			}
 			return ++virtual_clock;
 		}
 
-		void set_max_tokens(unsigned mt) {
-			max_tokens = mt;
+		void set_system_throughput(unsigned mt) {
+			throughput_system = mt;
 		}
 
-		unsigned get_max_tokens() const {
-			return max_tokens;
+		unsigned get_system_throughput() const {
+			return throughput_system;
 		}
 
-		unsigned num_tokens() const {
-			return tokens;
+		unsigned get_available_throughput() const {
+			return throughput_available;
 		}
 
-		void put_tokens(unsigned t) {
-			tokens += t;
-			if (tokens > max_tokens)
-				tokens = max_tokens;
+		void release_throughput(unsigned t) {
+			throughput_available += t;
+			if (throughput_available > throughput_system)
+				throughput_available = throughput_system;
 		}
 
-		void take_tokens(unsigned t) {
-			if (tokens > t)
-				tokens -= t;
+		void reserve_throughput(unsigned t) {
+			if (throughput_available > t)
+				throughput_available -= t;
 			else
-				tokens = 0;
+				throughput_available = 0;
+		}
+
+		void release_prop_throughput(unsigned t) {
+			throughput_prop -= t;
+			if (throughput_prop < 0)
+				throughput_prop = 0;
+		}
+
+		void reserve_prop_throughput(unsigned t) {
+			throughput_prop += t;
 		}
 
 		void purge_idle_clients() {
+			bool update_required = false;
 			typename Schedule::iterator it = schedule.begin();
 			for (; it != schedule.end();) {
 				if (!it->active) {
-					put_tokens(it->slo.reserve);
+					update_required = true;
+					if (it->slo.reserve)
+						release_throughput(it->slo.reserve);
+					if (it->slo.prop)
+						release_prop_throughput(it->slo.prop);
+
+					print_iops(); //testing
+
 					requests.erase(it->cl);
 					it = schedule.erase(it);
 				} else {
 					++it;
 				}
 			}
-			// update all proportional shares
-			for (it = schedule.begin(); it != schedule.end(); ++it) {
-				if (it->slo.prop) {
-					double_t _prop = (double_t) tokens * it->slo.prop;
-					if (_prop)
-						it->p_spacing = (double_t) max_tokens / _prop;
-				}
-			}
+			if (update_required)
+				recalculate_prop_throughput();
 		}
 
 		Tag* front(unsigned &out) {
@@ -485,10 +539,9 @@ class PrioritizedQueueDMClock {
 			}
 
 			//#ifdef DEBUG
-				//print_current_tag(tag->selected_tag, cl_index);
-				tag->stat++;
+			print_current_tag(tag->selected_tag, cl_index);
+			tag->stat++;
 			//#endif
-
 
 			T ret = requests[tag->cl].front();
 			requests[tag->cl].pop_front();
@@ -578,8 +631,8 @@ class PrioritizedQueueDMClock {
 public:
 	PrioritizedQueueDMClock(unsigned max_per, unsigned min_c) :
 			total_priority(0), max_tokens_per_subqueue(max_per), min_cost(min_c) {
-		dm_queue.set_max_tokens(max_tokens_per_subqueue);
-		dm_queue.put_tokens(max_tokens_per_subqueue);
+		dm_queue.set_system_throughput(max_tokens_per_subqueue);
+		dm_queue.release_throughput(max_tokens_per_subqueue);
 	}
 
 	unsigned length() const {
@@ -594,6 +647,7 @@ public:
 			assert(i->second.length());
 			total += i->second.length();
 		}
+		total += dm_queue.length();
 		return total;
 	}
 
@@ -653,10 +707,6 @@ public:
 		high_queue[priority].enqueue_front(cl, 0, item);
 	}
 
-	void enqueue_mClock(K cl, struct SLO slo, unsigned cost, T item) {
-		dm_queue.enqueue(cl, slo, cost, item);
-	}
-
 	void enqueue(K cl, unsigned priority, unsigned cost, T item) {
 		if (cost < min_cost)
 			cost = min_cost;
@@ -682,8 +732,16 @@ public:
 
 	T dequeue_mClock() {
 		assert(!(dm_queue.empty()));
-		//dm_queue.increment_clock(); // ceph_clock_now(NULL);
+		// ceph_clock_now(NULL);
 		return dm_queue.pop_front();
+	}
+
+	void enqueue_mClock(K cl, struct SLO slo, unsigned cost, T item) {
+		dm_queue.enqueue(cl, slo, cost, item);
+	}
+
+	void purge_mClock(){
+		dm_queue.purge_idle_clients();
 	}
 
 	T dequeue() {
@@ -725,6 +783,7 @@ public:
 		distribute_tokens(cost);
 		return ret;
 	}
+
 
 //	void dump(Formatter *f) const {
 //		f->dump_int("total_priority", total_priority);

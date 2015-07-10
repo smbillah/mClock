@@ -31,22 +31,23 @@ int main(int argc, char* argv[]) {
 //	now.set_from_double(space + now);
 
 
-	unsigned int throughput = 350;
 	unsigned int min_c = 10;
+	unsigned int throughput = 1000;
 	PrioritizedQueueDMClock<string, unsigned> dmClock(throughput, min_c);
 
 	SLO slo1, slo2, slo3;
-	slo1.reserve = 250;
-	slo2.reserve = 250;
+
+	slo1.reserve = 0;
+	slo1.prop = 100;
+	slo1.limit = 0;//350;
+
+	slo2.reserve = 0;
+	slo2.prop = 200;
+	slo2.limit = 0;//350;
+
 	slo3.reserve = 0;
-
-	slo1.prop = 1.0 / 6;
-	slo2.prop = 2.0 / 6;
-	slo3.prop = 3.0 / 6;
-
-	slo1.limit = 0;
-	slo2.limit = 0;
-	slo3.limit = 1000;
+	slo3.prop = 300;
+	slo3.limit = 0;//1000;
 
 	//// for dmclock
 	dmClock.enqueue_mClock(0, slo1, 0, "client0");
@@ -58,8 +59,10 @@ int main(int argc, char* argv[]) {
 				dmClock.enqueue_mClock(0, slo1, 0, "client0");
 			if (i == 1)
 				dmClock.enqueue_mClock(1, slo2, 0, "client1");
-			if (i == 2)
-				dmClock.enqueue_mClock(2, slo3, 0, "client2");
+			if (i == 2){
+				if(j < 200)
+					dmClock.enqueue_mClock(2, slo3, 0, "client2");
+			}
 		}
 	}
 
@@ -68,6 +71,7 @@ int main(int argc, char* argv[]) {
 	while (!dmClock.empty()) {
 		if(time == throughput) break;
 		string msg = dmClock.dequeue_mClock();
+		dmClock.purge_mClock();
 		if (msg == "client0")
 			count[0] += 1;
 		if (msg == "client1")
