@@ -294,37 +294,39 @@ class PrioritizedQueueDMClock {
 			update_min_deadlines();
 		}
 
-		void update_tags(size_t cl_index, bool was_idle = false) {
-			int64_t now = get_current_clock();
+		void update_active_tag(size_t cl_index) {
 			Tag *tag = &schedule[cl_index];
 
-			if (tag->selected_tag == Q_RESERVE || tag->selected_tag == Q_NONE) {
-				if (tag->r_deadline) {
-					if (was_idle) {
-						tag->r_deadline = std::max(
-								(tag->r_deadline + tag->r_spacing),
-								(double_t) now);
-					} else {
-						tag->r_deadline = tag->r_deadline + tag->r_spacing;
-					}
-				}
+			if (tag->selected_tag == Q_RESERVE) {
+				if (tag->r_deadline)
+					tag->r_deadline = tag->r_deadline + tag->r_spacing;
 			}
 			if (tag->p_deadline) {
-				if (was_idle) {
-					tag->p_deadline =
-							min_tag_p.deadline ? min_tag_p.deadline : now;
-				} else {
-					tag->p_deadline = tag->p_deadline + tag->p_spacing;
-				}
+				tag->p_deadline = tag->p_deadline + tag->p_spacing;
 			}
 			if (tag->l_deadline) {
-				if (was_idle) {
-					tag->l_deadline = std::max(
-							(tag->l_deadline + tag->l_spacing), (double_t) now);
-				} else {
-					tag->l_deadline = tag->l_deadline + tag->l_spacing;
-				}
+				tag->l_deadline = tag->l_deadline + tag->l_spacing;
+			}
+			update_min_deadlines();
+		}
 
+		// a separate function to update idle tags
+		// for better performance.
+		void update_idle_tag(size_t cl_index) {
+			int64_t now = get_current_clock();
+			Tag *tag = &schedule[cl_index];
+			tag->active = true;
+
+			if (tag->r_deadline) {
+				tag->r_deadline = std::max((tag->r_deadline + tag->r_spacing),
+						(double_t) now);
+			}
+			if (tag->p_deadline) {
+				tag->p_deadline = min_tag_p.deadline ? min_tag_p.deadline : now;
+			}
+			if (tag->l_deadline) {
+				tag->l_deadline = std::max((tag->l_deadline + tag->l_spacing),
+						(double_t) now);
 			}
 			update_min_deadlines();
 		}
@@ -391,7 +393,7 @@ class PrioritizedQueueDMClock {
 			}
 		}
 
-		bool get_client_index(K cl, size_t &index){
+		bool get_client_index(K cl, size_t &index) {
 			bool is_found = false;
 			for (typename Schedule::iterator it = schedule.begin();
 					it != schedule.end(); ++it) {
@@ -559,7 +561,7 @@ class PrioritizedQueueDMClock {
 				schedule[tag->cl].active = false;
 
 			increment_clock();
-			update_tags(cl_index);
+			update_active_tag(cl_index);
 			size--;
 			return ret;
 		}
@@ -572,8 +574,9 @@ class PrioritizedQueueDMClock {
 				if (requests[cl].empty()) {
 					size_t index = 0;
 					bool found = get_client_index(cl, index);
+					print_iops();
 					assert(found != false);
-					update_tags(index, true);
+					update_idle_tag(index);
 				}
 			}
 			requests[cl].push_back(item);
