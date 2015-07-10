@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
-	<name>Demo</name>
+	<name>mClock</name>
 	<comment></comment>
 	<projects>
+		<project>mClock</project>
 	</projects>
 	<buildSpec>
 		<buildCommand>

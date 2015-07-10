@@ -393,9 +393,9 @@ class PrioritizedQueueDMClock {
 
 		//helper function
 		void print_iops() {
-			std::cout << "throughput at: " <<virtual_clock << ":\n";
+			std::cout << "throughput at " << virtual_clock << ":\n";
 			for (unsigned i = 0; i < schedule.size(); i++)
-				std::cout << "client " << i << " IOPS :" << schedule[i].stat
+				std::cout << "\t client " << i << " IOPS :" << schedule[i].stat
 						<< std::endl;
 		}
 
@@ -437,10 +437,8 @@ class PrioritizedQueueDMClock {
 		}
 
 		int64_t increment_clock() {
-			if (virtual_clock == throughput_system) {
-				for (unsigned i = 0; i < schedule.size(); i++)
-					std::cout << "client " << i << " IOPS :" << schedule[i].stat
-							<< std::endl;
+			if ((virtual_clock % throughput_system) == 0) {
+				print_iops();
 			}
 			return ++virtual_clock;
 		}
@@ -740,7 +738,7 @@ public:
 		dm_queue.enqueue(cl, slo, cost, item);
 	}
 
-	void purge_mClock(){
+	void purge_mClock() {
 		dm_queue.purge_idle_clients();
 	}
 
@@ -783,7 +781,6 @@ public:
 		distribute_tokens(cost);
 		return ret;
 	}
-
 
 //	void dump(Formatter *f) const {
 //		f->dump_int("total_priority", total_priority);

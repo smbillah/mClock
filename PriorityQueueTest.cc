@@ -35,33 +35,42 @@ int main(int argc, char* argv[]) {
 	unsigned int throughput = 1000;
 	PrioritizedQueueDMClock<string, unsigned> dmClock(throughput, min_c);
 
-	SLO slo1, slo2, slo3;
+	SLO slo0, slo1, slo2, slo3;
 
-	slo1.reserve = 0;
-	slo1.prop = 100;
+	slo0.reserve = 250;
+	slo0.prop = 100;
+	slo0.limit = 0;//350;
+
+	slo1.reserve = 250;
+	slo1.prop = 200;
 	slo1.limit = 0;//350;
 
 	slo2.reserve = 0;
-	slo2.prop = 200;
-	slo2.limit = 0;//350;
+	slo2.prop = 300;
+	slo2.limit = 0;//1000;
 
-	slo3.reserve = 0;
+
+	slo3.reserve = 300;
 	slo3.prop = 300;
-	slo3.limit = 0;//1000;
+	slo3.limit = 350;//1000;
+
 
 	//// for dmclock
-	dmClock.enqueue_mClock(0, slo1, 0, "client0");
-	dmClock.enqueue_mClock(1, slo2, 0, "client1");
-	dmClock.enqueue_mClock(2, slo3, 0, "client2");
-	for (int i = 0; i < 3; i++) {
+	dmClock.enqueue_mClock(0, slo0, 0, "client0");
+	dmClock.enqueue_mClock(1, slo1, 0, "client1");
+	dmClock.enqueue_mClock(2, slo2, 0, "client2");
+	for (int i = 0; i < 4; i++) {
 		for (int j = 0; j < 20000; j++) {
 			if (i == 0)
-				dmClock.enqueue_mClock(0, slo1, 0, "client0");
+				dmClock.enqueue_mClock(0, slo0, 0, "client0");
 			if (i == 1)
-				dmClock.enqueue_mClock(1, slo2, 0, "client1");
+				dmClock.enqueue_mClock(1, slo1, 0, "client1");
 			if (i == 2){
-				if(j < 200)
-					dmClock.enqueue_mClock(2, slo3, 0, "client2");
+				//if(j < 200)
+					dmClock.enqueue_mClock(2, slo2, 0, "client2");
+			}
+			if (i == 3) {
+				dmClock.enqueue_mClock(3, slo3, 0, "client3");
 			}
 		}
 	}
